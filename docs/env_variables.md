@@ -248,6 +248,9 @@ use (which only ever the author of this LTO implementation will use). These are
 used if several separated instrumentations are performed which are then later
 combined.
 
+  - `AFL_LLVM_LTO_CALLER` activates collision free CALLER instrumentation
+  - `AFL_LLVM_LTO_CALLER` sets the maximum mumber of single block functions
+    to dig deeper into a real function. Default 0.
   - `AFL_LLVM_DOCUMENT_IDS=file` will document to a file which edge ID was given
     to which function. This helps to identify functions with variable bytes or
     which functions were touched by an input.
@@ -377,6 +380,9 @@ checks or alter some of the more exotic semantics of the tool:
 
   - Setting `AFL_DISABLE_TRIM` tells afl-fuzz not to trim test cases. This is
     usually a bad idea!
+
+  - Setting `AFL_DISABLE_REDUNDANT` disables any queue items that are redundant.
+    This can be useful with huge queues.
 
   - Setting `AFL_KEEP_TIMEOUTS` will keep longer running inputs if they reach
     new coverage
@@ -508,6 +514,8 @@ checks or alter some of the more exotic semantics of the tool:
   - `AFL_NO_SNAPSHOT` will advise afl-fuzz not to use the snapshot feature if
     the snapshot lkm is loaded.
 
+  - `AFL_NO_FASTRESUME` will not try to read or write a fast resume file.
+
   - Setting `AFL_NO_UI` inhibits the UI altogether and just periodically prints
     some basic stats. This behavior is also automatically triggered when the
     output from afl-fuzz is redirected to a file or to a pipe.
@@ -544,6 +552,9 @@ checks or alter some of the more exotic semantics of the tool:
     use a custom afl-qemu-trace or if you need to modify the afl-qemu-trace
     arguments.
 
+  - `AFL_SHA1_FILENAMES` causes AFL++ to generate files named by the SHA1 hash
+    of their contents, rather than use the standard `id:000000,...` names.
+
   - `AFL_SHUFFLE_QUEUE` randomly reorders the input queue on startup. Requested
     by some users for unorthodox parallelized fuzzing setups, but not advisable
     otherwise.
@@ -578,6 +589,9 @@ checks or alter some of the more exotic semantics of the tool:
   - `AFL_SYNC_TIME` allows you to specify a different minimal time (in minutes)
     between fuzzing instances synchronization. Default sync time is 30 minutes,
     note that time is halved for -M main nodes.
+
+  - `AFL_NO_SYNC` disables any syncing whatsoever and takes priority on all
+    other syncing parameters.
 
   - Setting `AFL_TARGET_ENV` causes AFL++ to set extra environment variables for
     the target binary. Example: `AFL_TARGET_ENV="VAR1=1 VAR2='a b c'" afl-fuzz

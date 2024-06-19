@@ -5,11 +5,11 @@
    Originally written by Michal Zalewski
 
    Now maintained by Marc Heuse <mh@mh-sec.de>,
-                        Heiko Eißfeldt <heiko.eissfeldt@hexco.de> and
+                        Heiko Eissfeldt <heiko.eissfeldt@hexco.de> and
                         Andrea Fioraldi <andreafioraldi@gmail.com>
 
    Copyright 2016, 2017 Google Inc. All rights reserved.
-   Copyright 2019-2023 AFLplusplus Project. All rights reserved.
+   Copyright 2019-2024 AFLplusplus Project. All rights reserved.
 
    Licensed under the Apache License, Version 2.0 (the "License");
    you may not use this file except in compliance with the License.
@@ -124,6 +124,9 @@ void bind_to_free_cpu(afl_state_t *afl) {
     }
 
     WARNF("Not binding to a CPU core (AFL_NO_AFFINITY set).");
+  #ifdef __linux__
+    if (afl->fsrv.nyx_mode) { afl->fsrv.nyx_bind_cpu_id = 0; }
+  #endif
     return;
 
   }
@@ -151,6 +154,9 @@ void bind_to_free_cpu(afl_state_t *afl) {
     } else {
 
       OKF("CPU binding request using -b %d successful.", afl->cpu_to_bind);
+  #ifdef __linux__
+      if (afl->fsrv.nyx_mode) { afl->fsrv.nyx_bind_cpu_id = afl->cpu_to_bind; }
+  #endif
 
     }
 
@@ -453,6 +459,24 @@ void bind_to_free_cpu(afl_state_t *afl) {
 
 #endif                                                     /* HAVE_AFFINITY */
 
+/* transforms spaces in a string to underscores (inplace) */
+
+static void no_spaces(u8 *string) {
+
+  if (string) {
+
+    u8 *ptr = string;
+    while (*ptr != 0) {
+
+      if (*ptr == ' ') { *ptr = '_'; }
+      ++ptr;
+
+    }
+
+  }
+
+}
+
 /* Shuffle an array of pointers. Might be slightly biased. */
 
 static void shuffle_ptrs(afl_state_t *afl, void **ptrs, u32 cnt) {
@@ -553,6 +577,8 @@ void read_foreign_testcases(afl_state_t *afl, int first) {
       afl->stage_cur = 0;
       afl->stage_max = 0;
 
+      show_stats(afl);
+
       for (i = 0; i < (u32)nl_cnt; ++i) {
 
         struct stat st;
@@ -631,7 +657,12 @@ void read_foreign_testcases(afl_state_t *afl, int first) {
         munmap(mem, st.st_size);
         close(fd);
 
-        if (st.st_mtime > mtime_max) mtime_max = st.st_mtime;
+        if (st.st_mtime > mtime_max) {
+
+          mtime_max = st.st_mtime;
+          show_stats(afl);
+
+        }
 
       }
 
@@ -908,6 +939,14 @@ void perform_dry_run(afl_state_t *afl) {
 
     res = calibrate_case(afl, q, use_mem, 0, 1);
 
+    /* For AFLFast schedules we update the queue entry */
+    if (unlikely(afl->schedule >= FAST && afl->schedule <= RARE) &&
+        likely(q->exec_cksum)) {
+
+      q->n_fuzz_entry = q->exec_cksum % N_FUZZ_SIZE;
+
+    }
+
     if (afl->stop_soon) { return; }
 
     if (res == afl->crash_mode || res == FSRV_RUN_NOBITS) {
@@ -980,7 +1019,7 @@ void perform_dry_run(afl_state_t *afl) {
 
           }
 
-          if (!q->was_fuzzed) {
+          if (unlikely(!q->was_fuzzed)) {
 
             q->was_fuzzed = 1;
             afl->reinit_table = 1;
@@ -1151,18 +1190,35 @@ void perform_dry_run(afl_state_t *afl) {
 
 #ifndef SIMPLE_FILES
 
-          snprintf(crash_fn, PATH_MAX, "%s/crashes/id:%06llu,sig:%02u,%s%s",
-                   afl->out_dir, afl->saved_crashes, afl->fsrv.last_kill_signal,
-                   describe_op(afl, 0,
-                               NAME_MAX - strlen("id:000000,sig:00,") -
-                                   strlen(use_name)),
-                   use_name);
+          if (!afl->afl_env.afl_sha1_filenames) {
+
+            snprintf(
+                crash_fn, PATH_MAX, "%s/crashes/id:%06llu,sig:%02u,%s%s%s%s",
+                afl->out_dir, afl->saved_crashes, afl->fsrv.last_kill_signal,
+                describe_op(
+                    afl, 0,
+                    NAME_MAX - strlen("id:000000,sig:00,") - strlen(use_name)),
+                use_name, afl->file_extension ? "." : "",
+                afl->file_extension ? (const char *)afl->file_extension : "");
+
+          } else {
+
+            const char *hex = sha1_hex(use_mem, read_len);
+            snprintf(
+                crash_fn, PATH_MAX, "%s/crashes/%s%s%s", afl->out_dir, hex,
+                afl->file_extension ? "." : "",
+                afl->file_extension ? (const char *)afl->file_extension : "");
+            ck_free((char *)hex);
+
+          }
 
 #else
 
-          snprintf(crash_fn, PATH_MAX, "%s/crashes/id_%06llu_%02u",
-                   afl->out_dir, afl->saved_crashes,
-                   afl->fsrv.last_kill_signal);
+          snprintf(
+              crash_fn, PATH_MAX, "%s/crashes/id_%06llu_%02u%s%s", afl->out_dir,
+              afl->saved_crashes, afl->fsrv.last_kill_signal,
+              afl->file_extension ? "." : "",
+              afl->file_extension ? (const char *)afl->file_extension : "");
 
 #endif
 
@@ -1366,10 +1422,10 @@ void perform_dry_run(afl_state_t *afl) {
 static void link_or_copy(u8 *old_path, u8 *new_path) {
 
   s32 i = link(old_path, new_path);
+  if (!i) { return; }
+
   s32 sfd, dfd;
   u8 *tmp;
-
-  if (!i) { return; }
 
   sfd = open(old_path, O_RDONLY);
   if (sfd < 0) { PFATAL("Unable to open '%s'", old_path); }
@@ -1433,7 +1489,9 @@ void pivot_inputs(afl_state_t *afl) {
       u32 src_id;
 
       afl->resuming_fuzz = 1;
-      nfn = alloc_printf("%s/queue/%s", afl->out_dir, rsl);
+      nfn = alloc_printf(
+          "%s/queue/%s%s%s", afl->out_dir, rsl, afl->file_extension ? "." : "",
+          afl->file_extension ? (const char *)afl->file_extension : "");
 
       /* Since we're at it, let's also get the parent and figure out the
          appropriate depth for this entry. */
@@ -1473,12 +1531,33 @@ void pivot_inputs(afl_state_t *afl) {
 
       }
 
-      nfn = alloc_printf("%s/queue/id:%06u,time:0,execs:%llu,orig:%s",
-                         afl->out_dir, id, afl->fsrv.total_execs, use_name);
+      if (!afl->afl_env.afl_sha1_filenames) {
+
+        nfn = alloc_printf(
+            "%s/queue/id:%06u,time:0,execs:%llu,orig:%s%s%s", afl->out_dir, id,
+            afl->fsrv.total_execs, use_name, afl->file_extension ? "." : "",
+            afl->file_extension ? (const char *)afl->file_extension : "");
+
+      } else {
+
+        const char *hex = sha1_hex_for_file(q->fname, q->len);
+        nfn = alloc_printf(
+            "%s/queue/%s%s%s", afl->out_dir, hex,
+            afl->file_extension ? "." : "",
+            afl->file_extension ? (const char *)afl->file_extension : "");
+        ck_free((char *)hex);
+
+      }
+
+      u8 *pos = strrchr(nfn, '/');
+      no_spaces(pos + 30);
 
 #else
 
-      nfn = alloc_printf("%s/queue/id_%06u", afl->out_dir, id);
+      nfn = alloc_printf(
+          "%s/queue/id_%06u%s%s", afl->out_dir, id,
+          afl->file_extension ? "." : "",
+          afl->file_extension ? (const char *)afl->file_extension : "");
 
 #endif                                                    /* ^!SIMPLE_FILES */
 
@@ -1685,10 +1764,11 @@ double get_runnable_processes(void) {
 
 void nuke_resume_dir(afl_state_t *afl) {
 
-  u8 *fn;
+  u8 *const case_prefix = afl->afl_env.afl_sha1_filenames ? "" : CASE_PREFIX;
+  u8       *fn;
 
   fn = alloc_printf("%s/_resume/.state/deterministic_done", afl->out_dir);
-  if (delete_files(fn, CASE_PREFIX)) { goto dir_cleanup_failed; }
+  if (delete_files(fn, case_prefix)) { goto dir_cleanup_failed; }
   ck_free(fn);
 
   fn = alloc_printf("%s/_resume/.state/auto_extras", afl->out_dir);
@@ -1696,11 +1776,11 @@ void nuke_resume_dir(afl_state_t *afl) {
   ck_free(fn);
 
   fn = alloc_printf("%s/_resume/.state/redundant_edges", afl->out_dir);
-  if (delete_files(fn, CASE_PREFIX)) { goto dir_cleanup_failed; }
+  if (delete_files(fn, case_prefix)) { goto dir_cleanup_failed; }
   ck_free(fn);
 
   fn = alloc_printf("%s/_resume/.state/variable_behavior", afl->out_dir);
-  if (delete_files(fn, CASE_PREFIX)) { goto dir_cleanup_failed; }
+  if (delete_files(fn, case_prefix)) { goto dir_cleanup_failed; }
   ck_free(fn);
 
   fn = alloc_printf("%s/_resume/.state", afl->out_dir);
@@ -1708,7 +1788,7 @@ void nuke_resume_dir(afl_state_t *afl) {
   ck_free(fn);
 
   fn = alloc_printf("%s/_resume", afl->out_dir);
-  if (delete_files(fn, CASE_PREFIX)) { goto dir_cleanup_failed; }
+  if (delete_files(fn, case_prefix)) { goto dir_cleanup_failed; }
   ck_free(fn);
 
   return;
@@ -1725,8 +1805,9 @@ dir_cleanup_failed:
 
 static void handle_existing_out_dir(afl_state_t *afl) {
 
-  FILE *f;
-  u8   *fn = alloc_printf("%s/fuzzer_stats", afl->out_dir);
+  u8 *const case_prefix = afl->afl_env.afl_sha1_filenames ? "" : CASE_PREFIX;
+  FILE     *f;
+  u8       *fn = alloc_printf("%s/fuzzer_stats", afl->out_dir);
 
   /* See if the output directory is locked. If yes, bail out. If not,
      create a lock that will persist for the lifetime of the process
@@ -1848,7 +1929,7 @@ static void handle_existing_out_dir(afl_state_t *afl) {
   /* Next, we need to clean up <afl->out_dir>/queue/.state/ subdirectories: */
 
   fn = alloc_printf("%s/queue/.state/deterministic_done", afl->out_dir);
-  if (delete_files(fn, CASE_PREFIX)) { goto dir_cleanup_failed; }
+  if (delete_files(fn, case_prefix)) { goto dir_cleanup_failed; }
   ck_free(fn);
 
   fn = alloc_printf("%s/queue/.state/auto_extras", afl->out_dir);
@@ -1856,11 +1937,11 @@ static void handle_existing_out_dir(afl_state_t *afl) {
   ck_free(fn);
 
   fn = alloc_printf("%s/queue/.state/redundant_edges", afl->out_dir);
-  if (delete_files(fn, CASE_PREFIX)) { goto dir_cleanup_failed; }
+  if (delete_files(fn, case_prefix)) { goto dir_cleanup_failed; }
   ck_free(fn);
 
   fn = alloc_printf("%s/queue/.state/variable_behavior", afl->out_dir);
-  if (delete_files(fn, CASE_PREFIX)) { goto dir_cleanup_failed; }
+  if (delete_files(fn, case_prefix)) { goto dir_cleanup_failed; }
   ck_free(fn);
 
   /* Then, get rid of the .state subdirectory itself (should be empty by now)
@@ -1871,7 +1952,7 @@ static void handle_existing_out_dir(afl_state_t *afl) {
   ck_free(fn);
 
   fn = alloc_printf("%s/queue", afl->out_dir);
-  if (delete_files(fn, CASE_PREFIX)) { goto dir_cleanup_failed; }
+  if (delete_files(fn, case_prefix)) { goto dir_cleanup_failed; }
   ck_free(fn);
 
   /* All right, let's do <afl->out_dir>/crashes/id:* and
@@ -1915,7 +1996,10 @@ static void handle_existing_out_dir(afl_state_t *afl) {
 
   }
 
-  if (delete_files(fn, CASE_PREFIX)) { goto dir_cleanup_failed; }
+#ifdef AFL_PERSISTENT_RECORD
+  delete_files(fn, RECORD_PREFIX);
+#endif
+  if (delete_files(fn, case_prefix)) { goto dir_cleanup_failed; }
   ck_free(fn);
 
   fn = alloc_printf("%s/hangs", afl->out_dir);
@@ -1947,7 +2031,10 @@ static void handle_existing_out_dir(afl_state_t *afl) {
 
   }
 
-  if (delete_files(fn, CASE_PREFIX)) { goto dir_cleanup_failed; }
+#ifdef AFL_PERSISTENT_RECORD
+  delete_files(fn, RECORD_PREFIX);
+#endif
+  if (delete_files(fn, case_prefix)) { goto dir_cleanup_failed; }
   ck_free(fn);
 
   /* And now, for some finishing touches. */
@@ -2229,6 +2316,21 @@ void setup_dirs_fds(afl_state_t *afl) {
   }
 
   fflush(afl->fsrv.plot_file);
+
+#ifdef INTROSPECTION
+
+  tmp = alloc_printf("%s/plot_det_data", afl->out_dir);
+
+  int fd = open(tmp, O_WRONLY | O_CREAT, DEFAULT_PERMISSION);
+  if (fd < 0) { PFATAL("Unable to create '%s'", tmp); }
+  ck_free(tmp);
+
+  afl->fsrv.det_plot_file = fdopen(fd, "w");
+  if (!afl->fsrv.det_plot_file) { PFATAL("fdopen() failed"); }
+
+  if (afl->in_place_resume) { fseek(afl->fsrv.det_plot_file, 0, SEEK_END); }
+
+#endif
 
   /* ignore errors */
 

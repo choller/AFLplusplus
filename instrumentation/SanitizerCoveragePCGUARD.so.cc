@@ -161,7 +161,9 @@ class ModuleSanitizerCoverageAFL
 
   void SetNoSanitizeMetadata(Instruction *I) {
 
-#if LLVM_VERSION_MAJOR >= 16
+#if LLVM_VERSION_MAJOR >= 19
+    I->setNoSanitizeMetadata();
+#elif LLVM_VERSION_MAJOR >= 16
     I->setMetadata(LLVMContext::MD_nosanitize, MDNode::get(*C, std::nullopt));
 #else
     I->setMetadata(I->getModule()->getMDKindID("nosanitize"),
@@ -179,7 +181,7 @@ class ModuleSanitizerCoverageAFL
   FunctionCallee  SanCovTraceSwitchFunction;
   GlobalVariable *SanCovLowestStack;
   Type *IntptrTy, *IntptrPtrTy, *Int64Ty, *Int64PtrTy, *Int32Ty, *Int32PtrTy,
-      *Int16Ty, *Int8Ty, *Int8PtrTy, *Int1Ty, *Int1PtrTy;
+      *Int16Ty, *Int8Ty, *Int8PtrTy, *Int1Ty, *Int1PtrTy, *PtrTy;
   Module           *CurModule;
   std::string       CurModuleUniqueId;
   Triple            TargetTriple;
@@ -195,7 +197,7 @@ class ModuleSanitizerCoverageAFL
 
   SanitizerCoverageOptions Options;
 
-  uint32_t        instr = 0, selects = 0, unhandled = 0;
+  uint32_t        instr = 0, selects = 0, unhandled = 0, dump_cc = 0;
   GlobalVariable *AFLMapPtr = NULL;
   ConstantInt    *One = NULL;
   ConstantInt    *Zero = NULL;
@@ -272,13 +274,19 @@ std::pair<Value *, Value *> ModuleSanitizerCoverageAFL::CreateSecStartEnd(
   if (!TargetTriple.isOSBinFormatCOFF())
     return std::make_pair(SecStart, SecEnd);
 
-  // Account for the fact that on windows-msvc __start_* symbols actually
-  // point to a uint64_t before the start of the array.
+    // Account for the fact that on windows-msvc __start_* symbols actually
+    // point to a uint64_t before the start of the array.
+#if LLVM_VERSION_MAJOR >= 19
+  auto GEP =
+      IRB.CreatePtrAdd(SecStart, ConstantInt::get(IntptrTy, sizeof(uint64_t)));
+  return std::make_pair(GEP, SecEnd);
+#else
   auto SecStartI8Ptr = IRB.CreatePointerCast(SecStart, Int8PtrTy);
   auto GEP = IRB.CreateGEP(Int8Ty, SecStartI8Ptr,
                            ConstantInt::get(IntptrTy, sizeof(uint64_t)));
   return std::make_pair(IRB.CreatePointerCast(GEP, PointerType::getUnqual(Ty)),
                         SecEnd);
+#endif
 
 }
 
@@ -330,6 +338,8 @@ bool ModuleSanitizerCoverageAFL::instrumentModule(
 
   if (getenv("AFL_DEBUG")) { debug = 1; }
 
+  if (getenv("AFL_DUMP_CYCLOMATIC_COMPLEXITY")) { dump_cc = 1; }
+
   if ((isatty(2) && !getenv("AFL_QUIET")) || debug) {
 
     SAYF(cCYA "SanitizerCoveragePCGUARD" VERSION cRST "\n");
@@ -368,6 +378,7 @@ bool ModuleSanitizerCoverageAFL::instrumentModule(
   Int16Ty = IRB.getInt16Ty();
   Int8Ty = IRB.getInt8Ty();
   Int1Ty = IRB.getInt1Ty();
+  PtrTy = PointerType::getUnqual(*C);
 
   LLVMContext &Ctx = M.getContext();
   AFLMapPtr =
@@ -570,7 +581,8 @@ void ModuleSanitizerCoverageAFL::instrumentFunction(
 
   if (F.empty()) return;
   if (!isInInstrumentList(&F, FMNAME)) return;
-  if (F.getName().find(".module_ctor") != std::string::npos)
+  // if (F.getName().find(".module_ctor") != std::string::npos)
+  if (F.getName().contains(".module_ctor"))
     return;  // Should not instrument sanitizer init functions.
 #if LLVM_VERSION_MAJOR >= 18
   if (F.getName().starts_with("__sanitizer_"))
@@ -593,6 +605,9 @@ void ModuleSanitizerCoverageAFL::instrumentFunction(
       isAsynchronousEHPersonality(classifyEHPersonality(F.getPersonalityFn())))
     return;
   if (F.hasFnAttribute(Attribute::NoSanitizeCoverage)) return;
+#if LLVM_VERSION_MAJOR >= 19
+  if (F.hasFnAttribute(Attribute::DisableSanitizerInstrumentation)) return;
+#endif
   if (Options.CoverageType >= SanitizerCoverageOptions::SCK_Edge)
     SplitAllCriticalEdges(
         F, CriticalEdgeSplittingOptions().setIgnoreUnreachableDests());
@@ -637,6 +652,8 @@ void ModuleSanitizerCoverageAFL::instrumentFunction(
   InjectCoverage(F, BlocksToInstrument, IsLeafFunc);
   // InjectTraceForCmp(F, CmpTraceTargets);
   // InjectTraceForSwitch(F, SwitchTraceTargets);
+
+  if (dump_cc) { calcCyclomaticComplexity(&F); }
 
 }
 
@@ -688,16 +705,16 @@ GlobalVariable *ModuleSanitizerCoverageAFL::CreatePCArray(
 
     if (&F.getEntryBlock() == AllBlocks[i]) {
 
-      PCs.push_back((Constant *)IRB.CreatePointerCast(&F, IntptrPtrTy));
-      PCs.push_back((Constant *)IRB.CreateIntToPtr(
-          ConstantInt::get(IntptrTy, 1), IntptrPtrTy));
+      PCs.push_back((Constant *)IRB.CreatePointerCast(&F, PtrTy));
+      PCs.push_back(
+          (Constant *)IRB.CreateIntToPtr(ConstantInt::get(IntptrTy, 1), PtrTy));
 
     } else {
 
       PCs.push_back((Constant *)IRB.CreatePointerCast(
-          BlockAddress::get(AllBlocks[i]), IntptrPtrTy));
+          BlockAddress::get(AllBlocks[i]), PtrTy));
 #if LLVM_VERSION_MAJOR >= 16
-      PCs.push_back(Constant::getNullValue(IntptrPtrTy));
+      PCs.push_back(Constant::getNullValue(PtrTy));
 #else
       PCs.push_back((Constant *)IRB.CreateIntToPtr(
           ConstantInt::get(IntptrTy, 0), IntptrPtrTy));
@@ -707,10 +724,10 @@ GlobalVariable *ModuleSanitizerCoverageAFL::CreatePCArray(
 
   }
 
-  auto *PCArray = CreateFunctionLocalArrayInSection(N * 2, F, IntptrPtrTy,
-                                                    SanCovPCsSectionName);
+  auto *PCArray =
+      CreateFunctionLocalArrayInSection(N * 2, F, PtrTy, SanCovPCsSectionName);
   PCArray->setInitializer(
-      ConstantArray::get(ArrayType::get(IntptrPtrTy, N * 2), PCs));
+      ConstantArray::get(ArrayType::get(PtrTy, N * 2), PCs));
   PCArray->setConstant(true);
 
   return PCArray;
@@ -818,7 +835,12 @@ bool ModuleSanitizerCoverageAFL::InjectCoverage(
         StringRef FuncName = Callee->getName();
         if (FuncName.compare(StringRef("__afl_coverage_interesting"))) continue;
 
+#if LLVM_VERSION_MAJOR >= 20
+        // test canary
+        InstrumentationIRBuilder IRB(callInst);
+#else
         IRBuilder<> IRB(callInst);
+#endif
 
         if (!FunctionGuardArray) {
 

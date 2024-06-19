@@ -5,7 +5,7 @@
    Written by Marc Heuse <mh@mh-sec.de>
 
    Copyright 2015, 2016 Google Inc. All rights reserved.
-   Copyright 2019-2023 AFLplusplus Project. All rights reserved.
+   Copyright 2019-2024 AFLplusplus Project. All rights reserved.
 
    Licensed under the Apache License, Version 2.0 (the "License");
    you may not use this file except in compliance with the License.
@@ -204,6 +204,8 @@ bool InjectionRoutines::hookRtns(Module &M) {
   Function *FuncPtr;
 #endif
 
+  bool ret = false;
+
   /* iterate over all functions, bbs and instruction and add suitable calls */
   for (auto &F : M) {
 
@@ -281,6 +283,7 @@ bool InjectionRoutines::hookRtns(Module &M) {
 
             IRBuilder<> IRB(callInst->getParent());
             IRB.SetInsertPoint(callInst);
+            ret = true;
 
             Value *parameter = callInst->getArgOperand(param);
 
@@ -299,7 +302,7 @@ bool InjectionRoutines::hookRtns(Module &M) {
 
   }
 
-  return true;
+  return ret;
 
 }
 
@@ -328,16 +331,16 @@ bool InjectionRoutines::runOnModule(Module &M) {
   if (getenv("AFL_LLVM_INJECTIONS_LDAP")) { doLDAP = true; }
   if (getenv("AFL_LLVM_INJECTIONS_XSS")) { doXSS = true; }
 
-  hookRtns(M);
-#if LLVM_VERSION_MAJOR >= 11                        /* use new pass manager */
-  auto PA = PreservedAnalyses::all();
-#endif
+  bool ret = hookRtns(M);
   verifyModule(M);
 
 #if LLVM_VERSION_MAJOR >= 11                        /* use new pass manager */
-  return PA;
+  if (ret == false)
+    return PreservedAnalyses::all();
+  else
+    return PreservedAnalyses();
 #else
-  return true;
+  return ret;
 #endif
 
 }

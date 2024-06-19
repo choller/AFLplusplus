@@ -5,11 +5,12 @@
    Originally written by Michal Zalewski
 
    Now maintained by Marc Heuse <mh@mh-sec.de>,
-                        Heiko Eißfeldt <heiko.eissfeldt@hexco.de> and
-                        Andrea Fioraldi <andreafioraldi@gmail.com>
+                     Dominik Meier <mail@dmnk.co>,
+                     Andrea Fioraldi <andreafioraldi@gmail.com>, and
+                     Heiko Eissfeldt <heiko.eissfeldt@hexco.de>
 
    Copyright 2016, 2017 Google Inc. All rights reserved.
-   Copyright 2019-2023 AFLplusplus Project. All rights reserved.
+   Copyright 2019-2024 AFLplusplus Project. All rights reserved.
 
    Licensed under the Apache License, Version 2.0 (the "License");
    you may not use this file except in compliance with the License.
@@ -75,7 +76,13 @@ char *get_fuzzing_state(afl_state_t *afl) {
 
 void write_setup_file(afl_state_t *afl, u32 argc, char **argv) {
 
-  u8 fn[PATH_MAX];
+  u8 fn[PATH_MAX], fn2[PATH_MAX];
+
+  snprintf(fn2, PATH_MAX, "%s/target_hash", afl->out_dir);
+  FILE *f2 = create_ffile(fn2);
+  fprintf(f2, "%p\n", (void *)get_binary_hash(afl->fsrv.target_path));
+  fclose(f2);
+
   snprintf(fn, PATH_MAX, "%s/fuzzer_setup", afl->out_dir);
   FILE *f = create_ffile(fn);
   u32   i;
@@ -133,6 +140,12 @@ void write_setup_file(afl_state_t *afl, u32 argc, char **argv) {
 
 }
 
+static bool starts_with(char *key, char *line) {
+
+  return strncmp(key, line, strlen(key)) == 0;
+
+}
+
 /* load some of the existing stats file when resuming.*/
 void load_stats_file(afl_state_t *afl) {
 
@@ -175,58 +188,90 @@ void load_stats_file(afl_state_t *afl) {
       strcpy(keystring, lstartptr);
       lptr++;
       char *nptr;
-      switch (lineno) {
+      if (starts_with("run_time", keystring)) {
 
-        case 3:
-          if (!strcmp(keystring, "run_time          "))
-            afl->prev_run_time = 1000 * strtoull(lptr, &nptr, 10);
-          break;
-        case 5:
-          if (!strcmp(keystring, "cycles_done       "))
-            afl->queue_cycle =
-                strtoull(lptr, &nptr, 10) ? strtoull(lptr, &nptr, 10) + 1 : 0;
-          break;
-        case 7:
-          if (!strcmp(keystring, "execs_done        "))
-            afl->fsrv.total_execs = strtoull(lptr, &nptr, 10);
-          break;
-        case 10:
-          if (!strcmp(keystring, "corpus_count      ")) {
+        afl->prev_run_time = 1000 * strtoull(lptr, &nptr, 10);
 
-            u32 corpus_count = strtoul(lptr, &nptr, 10);
-            if (corpus_count != afl->queued_items) {
+      }
 
-              WARNF(
-                  "queue/ has been modified -- things might not work, you're "
-                  "on your own!");
+      if (starts_with("cycles_done", keystring)) {
 
-            }
+        afl->queue_cycle =
+            strtoull(lptr, &nptr, 10) ? strtoull(lptr, &nptr, 10) + 1 : 0;
 
-          }
+      }
 
-          break;
-        case 12:
-          if (!strcmp(keystring, "corpus_found      "))
-            afl->queued_discovered = strtoul(lptr, &nptr, 10);
-          break;
-        case 13:
-          if (!strcmp(keystring, "corpus_imported   "))
-            afl->queued_imported = strtoul(lptr, &nptr, 10);
-          break;
-        case 14:
-          if (!strcmp(keystring, "max_depth         "))
-            afl->max_depth = strtoul(lptr, &nptr, 10);
-          break;
-        case 21:
-          if (!strcmp(keystring, "saved_crashes    "))
-            afl->saved_crashes = strtoull(lptr, &nptr, 10);
-          break;
-        case 22:
-          if (!strcmp(keystring, "saved_hangs      "))
-            afl->saved_hangs = strtoull(lptr, &nptr, 10);
-          break;
-        default:
-          break;
+      if (starts_with("calibration_time", keystring)) {
+
+        afl->calibration_time_us = strtoull(lptr, &nptr, 10) * 1000000;
+
+      }
+
+      if (starts_with("sync_time", keystring)) {
+
+        afl->sync_time_us = strtoull(lptr, &nptr, 10) * 1000000;
+
+      }
+
+      if (starts_with("cmplog_time", keystring)) {
+
+        afl->cmplog_time_us = strtoull(lptr, &nptr, 10) * 1000000;
+
+      }
+
+      if (starts_with("trim_time", keystring)) {
+
+        afl->trim_time_us = strtoull(lptr, &nptr, 10) * 1000000;
+
+      }
+
+      if (starts_with("execs_done", keystring)) {
+
+        afl->fsrv.total_execs = strtoull(lptr, &nptr, 10);
+
+      }
+
+      if (starts_with("corpus_count", keystring)) {
+
+        u32 corpus_count = strtoul(lptr, &nptr, 10);
+        if (corpus_count != afl->queued_items) {
+
+          WARNF(
+              "queue/ has been modified -- things might not work, you're "
+              "on your own!");
+          sleep(3);
+
+        }
+
+      }
+
+      if (starts_with("corpus_found", keystring)) {
+
+        afl->queued_discovered = strtoul(lptr, &nptr, 10);
+
+      }
+
+      if (starts_with("corpus_imported", keystring)) {
+
+        afl->queued_imported = strtoul(lptr, &nptr, 10);
+
+      }
+
+      if (starts_with("max_depth", keystring)) {
+
+        afl->max_depth = strtoul(lptr, &nptr, 10);
+
+      }
+
+      if (starts_with("saved_crashes", keystring)) {
+
+        afl->saved_crashes = strtoull(lptr, &nptr, 10);
+
+      }
+
+      if (starts_with("saved_hangs", keystring)) {
+
+        afl->saved_hangs = strtoull(lptr, &nptr, 10);
 
       }
 
@@ -288,8 +333,11 @@ void write_stats_file(afl_state_t *afl, u32 t_bytes, double bitmap_cvg,
 #ifndef __HAIKU__
   if (getrusage(RUSAGE_CHILDREN, &rus)) { rus.ru_maxrss = 0; }
 #endif
-  u64 runtime = afl->prev_run_time + cur_time - afl->start_time;
-  if (!runtime) { runtime = 1; }
+  u64 runtime_ms = afl->prev_run_time + cur_time - afl->start_time;
+  u64 overhead_ms = (afl->calibration_time_us + afl->sync_time_us +
+                     afl->trim_time_us + afl->cmplog_time_us) /
+                    1000;
+  if (!runtime_ms) { runtime_ms = 1; }
 
   fprintf(
       f,
@@ -300,6 +348,11 @@ void write_stats_file(afl_state_t *afl, u32 t_bytes, double bitmap_cvg,
       "cycles_done       : %llu\n"
       "cycles_wo_finds   : %llu\n"
       "time_wo_finds     : %llu\n"
+      "fuzz_time         : %llu\n"
+      "calibration_time  : %llu\n"
+      "cmplog_time       : %llu\n"
+      "sync_time         : %llu\n"
+      "trim_time         : %llu\n"
       "execs_done        : %llu\n"
       "execs_per_sec     : %0.02f\n"
       "execs_ps_last_min : %0.02f\n"
@@ -337,15 +390,19 @@ void write_stats_file(afl_state_t *afl, u32 t_bytes, double bitmap_cvg,
       "\n"
       "target_mode       : %s%s%s%s%s%s%s%s%s%s\n"
       "command_line      : %s\n",
-      (afl->start_time - afl->prev_run_time) / 1000, cur_time / 1000,
-      runtime / 1000, (u32)getpid(),
+      (afl->start_time /*- afl->prev_run_time*/) / 1000, cur_time / 1000,
+      runtime_ms / 1000, (u32)getpid(),
       afl->queue_cycle ? (afl->queue_cycle - 1) : 0, afl->cycles_wo_finds,
       afl->longest_find_time > cur_time - afl->last_find_time
           ? afl->longest_find_time / 1000
           : ((afl->start_time == 0 || afl->last_find_time == 0)
                  ? 0
                  : (cur_time - afl->last_find_time) / 1000),
-      afl->fsrv.total_execs, afl->fsrv.total_execs / ((double)(runtime) / 1000),
+      (runtime_ms - MIN(runtime_ms, overhead_ms)) / 1000,
+      afl->calibration_time_us / 1000000, afl->cmplog_time_us / 1000000,
+      afl->sync_time_us / 1000000, afl->trim_time_us / 1000000,
+      afl->fsrv.total_execs,
+      afl->fsrv.total_execs / ((double)(runtime_ms) / 1000),
       afl->last_avg_execs_saved, afl->queued_items, afl->queued_favored,
       afl->queued_discovered, afl->queued_imported, afl->queued_variable,
       afl->max_depth, afl->current_entry, afl->pending_favored,
@@ -502,6 +559,44 @@ void maybe_update_plot_file(afl_state_t *afl, u32 t_bytes, double bitmap_cvg,
 
 }
 
+/* Log deterministic stage efficiency */
+
+void plot_profile_data(afl_state_t *afl, struct queue_entry *q) {
+
+  u64 current_ms = get_cur_time() - afl->start_time;
+
+  u32    current_edges = count_non_255_bytes(afl, afl->virgin_bits);
+  double det_finding_rate = (double)afl->havoc_prof->total_det_edge * 100.0 /
+                            (double)current_edges,
+         det_time_rate = (double)afl->havoc_prof->total_det_time * 100.0 /
+                         (double)current_ms;
+
+  u32 ndet_bits = 0;
+  for (u32 i = 0; i < afl->fsrv.map_size; i++) {
+
+    if (afl->skipdet_g->virgin_det_bits[i]) ndet_bits += 1;
+
+  }
+
+  double det_fuzzed_rate = (double)ndet_bits * 100.0 / (double)current_edges;
+
+  fprintf(afl->fsrv.det_plot_file,
+          "[%02lld:%02lld:%02lld] fuzz %d (%d), find %d/%d among %d(%02.2f) "
+          "and spend %lld/%lld(%02.2f), cover %02.2f yet, %d/%d undet bits, "
+          "continue %d.\n",
+          current_ms / 1000 / 3600, (current_ms / 1000 / 60) % 60,
+          (current_ms / 1000) % 60, afl->current_entry, q->fuzz_level,
+          afl->havoc_prof->edge_det_stage, afl->havoc_prof->edge_havoc_stage,
+          current_edges, det_finding_rate,
+          afl->havoc_prof->det_stage_time / 1000,
+          afl->havoc_prof->havoc_stage_time / 1000, det_time_rate,
+          det_fuzzed_rate, q->skipdet_e->undet_bits,
+          afl->skipdet_g->undet_bits_threshold, q->skipdet_e->continue_inf);
+
+  fflush(afl->fsrv.det_plot_file);
+
+}
+
 /* Check terminal dimensions after resize. */
 
 static void check_term_size(afl_state_t *afl) {
@@ -551,9 +646,10 @@ void show_stats_normal(afl_state_t *afl) {
 
   cur_ms = get_cur_time();
 
-  if (afl->most_time_key) {
+  if (afl->most_time_key && afl->queue_cycle) {
 
-    if (afl->most_time * 1000 < cur_ms - afl->start_time) {
+    if (afl->most_time * 1000 + afl->sync_time_us / 1000 <
+        cur_ms - afl->start_time) {
 
       afl->most_time_key = 2;
       afl->stop_soon = 2;
@@ -562,7 +658,7 @@ void show_stats_normal(afl_state_t *afl) {
 
   }
 
-  if (afl->most_execs_key == 1) {
+  if (afl->most_execs_key == 1 && afl->queue_cycle) {
 
     if (afl->most_execs <= afl->fsrv.total_execs) {
 
@@ -838,6 +934,10 @@ void show_stats_normal(afl_state_t *afl) {
 
 #endif
 
+    if (banner_pad)
+      for (u32 i = 0; i < banner_pad; ++i)
+        strcat(banner, " ");
+
   }
 
   SAYF("\n%s\n", banner);
@@ -1074,7 +1174,7 @@ void show_stats_normal(afl_state_t *afl) {
 
   } else if (likely(afl->skip_deterministic)) {
 
-    strcpy(tmp, "disabled (default, enable with -D)");
+    strcpy(tmp, "disabled (-z switch used)");
 
   } else {
 
@@ -1246,7 +1346,9 @@ void show_stats_normal(afl_state_t *afl) {
 
     sprintf(tmp, "disabled, ");
 
-  } else if (unlikely(!afl->bytes_trim_out)) {
+  } else if (unlikely(!afl->bytes_trim_out ||
+
+                      afl->bytes_trim_in <= afl->bytes_trim_out)) {
 
     sprintf(tmp, "n/a, ");
 
@@ -1263,7 +1365,9 @@ void show_stats_normal(afl_state_t *afl) {
 
     strcat(tmp, "disabled");
 
-  } else if (unlikely(!afl->blocks_eff_total)) {
+  } else if (unlikely(!afl->blocks_eff_total ||
+
+                      afl->blocks_eff_select >= afl->blocks_eff_total)) {
 
     strcat(tmp, "n/a");
 
@@ -1377,9 +1481,10 @@ void show_stats_pizza(afl_state_t *afl) {
 
   cur_ms = get_cur_time();
 
-  if (afl->most_time_key) {
+  if (afl->most_time_key && afl->queue_cycle) {
 
-    if (afl->most_time * 1000 < cur_ms - afl->start_time) {
+    if (afl->most_time * 1000 + afl->sync_time_us / 1000 <
+        cur_ms - afl->start_time) {
 
       afl->most_time_key = 2;
       afl->stop_soon = 2;
@@ -1388,7 +1493,7 @@ void show_stats_pizza(afl_state_t *afl) {
 
   }
 
-  if (afl->most_execs_key == 1) {
+  if (afl->most_execs_key == 1 && afl->queue_cycle) {
 
     if (afl->most_execs <= afl->fsrv.total_execs) {
 
@@ -2394,6 +2499,38 @@ void show_init_stats(afl_state_t *afl) {
 
   OKF("All set and ready to roll!");
 #undef IB
+
+}
+
+inline void update_calibration_time(afl_state_t *afl, u64 *time) {
+
+  u64 cur = get_cur_time_us();
+  afl->calibration_time_us += cur - *time;
+  *time = cur;
+
+}
+
+inline void update_trim_time(afl_state_t *afl, u64 *time) {
+
+  u64 cur = get_cur_time_us();
+  afl->trim_time_us += cur - *time;
+  *time = cur;
+
+}
+
+inline void update_sync_time(afl_state_t *afl, u64 *time) {
+
+  u64 cur = get_cur_time_us();
+  afl->sync_time_us += cur - *time;
+  *time = cur;
+
+}
+
+inline void update_cmplog_time(afl_state_t *afl, u64 *time) {
+
+  u64 cur = get_cur_time_us();
+  afl->cmplog_time_us += cur - *time;
+  *time = cur;
 
 }
 
